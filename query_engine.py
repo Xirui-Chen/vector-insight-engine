@@ -1,15 +1,15 @@
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import google.genai as genai
-from google.genai.types import GenerateContentConfig
+from google.genai.types import EmbedContentConfig, GenerateContentConfig
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
+from dotenv import load_dotenv
 
 COLLECTION_NAME = "vector_insight_chunks"
-
-GEMINI_MODEL = "gemini-2.0-flash"
 EMBEDDING_MODEL = "text-embedding-004"
+GENERATION_MODEL = "gemini-2.0-flash"
 
 
 def get_gemini_client() -> genai.Client:
@@ -20,7 +20,19 @@ def get_gemini_client() -> genai.Client:
 
 
 def get_qdrant_client() -> QdrantClient:
+    """
+    Same logic as ingest.py
+
+    Local dev:
+      USE_LOCAL_QDRANT is not set or is "0" -> use Qdrant Cloud from .env
+    Streamlit Cloud:
+      USE_LOCAL_QDRANT = "1" in secrets -> use embedded Qdrant at ./qdrant_data
+    """
     use_local = os.getenv("USE_LOCAL_QDRANT", "0") == "1"
+
+    if not use_local:
+        load_dotenv(".env")
+
     url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
 
@@ -29,47 +41,45 @@ def get_qdrant_client() -> QdrantClient:
         return QdrantClient(path="qdrant_data")
 
     print(f"[query] Using remote Qdrant at {url}")
-    return QdrantClient(url=url, api_key=api_key, timeout=10)
+    return QdrantClient(
+        url=url,
+        api_key=api_key,
+        timeout=10.0,
+    )
 
 
-def embed_text(text: str) -> List[float]:
+def embed_query(text: str) -> List[float]:
+    """
+    Embed a user question as a retrieval query vector.
+    """
     client = get_gemini_client()
     result = client.models.embed_content(
         model=EMBEDDING_MODEL,
         contents=text,
+        config=EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
     )
     return result.embeddings[0].values
 
 
-def ensure_collection_exists() -> None:
-    qdrant = get_qdrant_client()
-    collections = qdrant.get_collections().collections
-    names = {c.name for c in collections}
-    if COLLECTION_NAME not in names:
-        # Create with a test embedding to obtain the dimension
-        example_vector = embed_text("test")
-        qdrant.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=rest.VectorParams(
-                size=len(example_vector),
-                distance=rest.Distance.COSINE,
-            ),
-        )
-
-
 def search_similar_chunks(
-    query_text: str,
+    question: str,
     top_k: int = 3,
-    project: Optional[str] = None,
+    project: str | None = None,
 ) -> List[Dict]:
     """
-    Embed the query and search for similar chunks in Qdrant.
+    Search Qdrant for the chunks most relevant to the question.
 
-    If project is provided, restrict to that project label.
+    Returns a list of dict hits:
+    {
+        "index": int,
+        "score": float,
+        "text": str,
+        "project": str,
+        "document_name": str,
+    }
     """
-    ensure_collection_exists()
     qdrant = get_qdrant_client()
-    query_vector = embed_text(query_text)
+    query_vector = embed_query(question)
 
     query_filter = None
     if project:
@@ -82,111 +92,122 @@ def search_similar_chunks(
             ]
         )
 
-    results = qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
-        query_filter=query_filter,
-        limit=top_k,
-    )
+    print("[query] searching similar chunks, top_k =", top_k)
+
+    # Newer clients have query_points, older ones only have search.
+    if hasattr(qdrant, "query_points"):
+        resp = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vector,
+            limit=top_k,
+            filter=query_filter,
+        )
+        raw_hits = resp.points
+    else:
+        resp = qdrant.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vector,
+            limit=top_k,
+            query_filter=query_filter,
+        )
+        raw_hits = resp
 
     hits: List[Dict] = []
-    for point in results:
+
+    for idx, point in enumerate(raw_hits, start=1):
+        payload = point.payload or {}
         hits.append(
             {
-                "score": float(point.score),
-                "text": point.payload.get("text", ""),
-                "project": point.payload.get("project", ""),
-                "document_name": point.payload.get("document_name", ""),
+                "index": idx,
+                "score": point.score,
+                "text": payload.get("text", ""),
+                "project": payload.get("project", ""),
+                "document_name": payload.get("document_name", ""),
             }
         )
+
     return hits
 
 
-def build_context_block(hits: List[Dict]) -> str:
-    lines = []
-    for idx, hit in enumerate(hits, start=1):
-        lines.append(f"[{idx}] {hit['text']}")
+def build_context_string(hits: List[Dict]) -> str:
+    """
+    Turn retrieved chunks into a numbered context block for Gemini.
+    """
+    lines: List[str] = []
+    for hit in hits:
+        idx = hit["index"]
+        text = hit["text"]
+        lines.append(f"[{idx}] {text}")
     return "\n\n".join(lines)
 
 
-def answer_question(
+def call_gemini_with_context(
     question: str,
-    top_k: int = 3,
-    project: Optional[str] = None,
-) -> Dict:
+    context: str,
+) -> str:
     """
-    Full RAG pipeline.
-
-    Returns:
-    - answer: str
-    - hits: list of {index, score, text, project, document_name}
-    - raw_context: str
+    Ask Gemini to answer the question using only the provided context.
     """
-    hits = search_similar_chunks(question, top_k=top_k, project=project)
-    context_block = build_context_block(hits)
+    client = get_gemini_client()
 
     prompt = f"""
 You are an AI research assistant.
 
-You receive:
-1. A user question.
-2. A context block made from retrieved snippets, each numbered like [1], [2].
+You receive a user question and several numbered context snippets
+retrieved from a vector database.
 
-Use only this context to answer.
-If the context is insufficient, say you cannot answer confidently.
-Cite snippets in square brackets, for example [1] or [1][2].
+Rules:
+- Answer the question using only the information in the context.
+- When you use a snippet, cite it in square brackets like [1] or [2][3].
+- If the answer is not in the context, say you do not know based on the provided documents.
 
-Current project label: {project}
+Context:
+{context}
 
-User question:
+Question:
 {question}
-
-Retrieved context:
-{context_block}
 """
 
-    client = get_gemini_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
+    resp = client.models.generate_content(
+        model=GENERATION_MODEL,
         contents=prompt,
         config=GenerateContentConfig(
             temperature=0.3,
             max_output_tokens=512,
         ),
     )
+    return resp.text.strip()
 
-    answer_text = response.text.strip()
 
-    indexed_hits = []
-    for idx, hit in enumerate(hits, start=1):
-        indexed_hits.append(
-            {
-                "index": idx,
-                "score": hit["score"],
-                "text": hit["text"],
-                "project": hit.get("project", ""),
-                "document_name": hit.get("document_name", ""),
-            }
-        )
+def answer_question(
+    question: str,
+    top_k: int = 3,
+    project: str | None = None,
+) -> Dict:
+    """
+    Main entry point called from the Streamlit app.
+
+    Returns:
+    {
+        "answer": str,
+        "hits": List[Dict],
+    }
+    """
+    hits = search_similar_chunks(question, top_k=top_k, project=project)
+    context = build_context_string(hits)
+    answer = call_gemini_with_context(question, context)
 
     return {
-        "answer": answer_text,
-        "hits": indexed_hits,
-        "raw_context": context_block,
+        "answer": answer,
+        "hits": hits,
     }
 
 
 if __name__ == "__main__":
-    project_label = input("Project label to query (empty for all): ").strip() or None
-    user_q = input("Question: ")
-    result = answer_question(user_q, top_k=3, project=project_label)
-    print("\nAnswer:\n")
-    print(result["answer"])
-    print("\nRetrieved context:\n")
-    for h in result["hits"]:
-        print(
-            f"[{h['index']}] "
-            f"(score: {h['score']:.4f}) "
-            f"[project: {h['project']} | doc: {h['document_name']}] "
-            f"{h['text']}"
-        )
+    # Small CLI test
+    q = "What is the main goal of the Vector Insight Engine project?"
+    res = answer_question(q, top_k=3, project="demo")
+    print("Answer:\n", res["answer"])
+    print("\nHits:")
+    for h in res["hits"]:
+        print(h["index"], h["score"], h["document_name"])
