@@ -32,6 +32,7 @@ def get_qdrant_client() -> QdrantClient:
     use_local = os.getenv("USE_LOCAL_QDRANT", "0") == "1"
 
     if not use_local:
+        # Load .env only when using a remote instance
         load_dotenv(".env")
 
     url = os.getenv("QDRANT_URL")
@@ -50,9 +51,7 @@ def get_qdrant_client() -> QdrantClient:
 
 
 def embed_query(text: str) -> List[float]:
-    """
-    Embed the user question into a vector for retrieval.
-    """
+    """Embed the user question into a vector for retrieval."""
     client = get_gemini_client()
     result = client.models.embed_content(
         model=EMBEDDING_MODEL,
@@ -95,7 +94,7 @@ def search_similar_chunks(
 
     print("[query] searching similar chunks, top_k =", top_k)
 
-    # Use the recommended query_points API instead of the deprecated search method
+    # Use the query_points API (available in your Qdrant client)
     resp = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
@@ -120,10 +119,8 @@ def search_similar_chunks(
     return hits
 
 
-def build_context_string(hits: List[Dict]) -> str:
-    """
-    Build a numbered context block from hits to send to Gemini.
-    """
+def build_context_block(hits: List[Dict]) -> str:
+    """Build a numbered context block from hits to send to Gemini."""
     lines: List[str] = []
     for hit in hits:
         idx = hit["index"]
@@ -132,13 +129,8 @@ def build_context_string(hits: List[Dict]) -> str:
     return "\n\n".join(lines)
 
 
-def call_gemini_with_context(
-    question: str,
-    context: str,
-) -> str:
-    """
-    Call Gemini with the retrieved context to generate an answer.
-    """
+def call_gemini_with_context(question: str, context_block: str) -> str:
+    """Call Gemini with the retrieved context to generate an answer."""
     client = get_gemini_client()
 
     prompt = f"""
@@ -153,7 +145,7 @@ Rules:
 - If the answer is not in the context, say you do not know based on the provided documents.
 
 Context:
-{context}
+{context_block}
 
 Question:
 {question}
@@ -178,28 +170,29 @@ def answer_question(
     """
     Main entry point used by the Streamlit app.
 
-    Returns:
-    {
-        "answer": str,
-        "hits": List[Dict],
-    }
+    Returns a dict with:
+    - answer: str
+    - hits: list of {index, score, text, project, document_name}
+    - raw_context: str
     """
     hits = search_similar_chunks(question, top_k=top_k, project=project)
-    context = build_context_string(hits)
-    answer = call_gemini_with_context(question, context)
+    context_block = build_context_block(hits)
+
+    answer = call_gemini_with_context(question, context_block)
 
     return {
         "answer": answer,
         "hits": hits,
+        "raw_context": context_block,
     }
 
 
 if __name__ == "__main__":
     # Quick local test
+    os.environ.setdefault("USE_LOCAL_QDRANT", "1")
     q = "What is the main goal of the Vector Insight Engine project?"
     res = answer_question(q, top_k=3, project="demo")
     print("Answer:\n", res["answer"])
     print("\nHits:")
     for h in res["hits"]:
         print(h["index"], h["score"], h["document_name"])
-
