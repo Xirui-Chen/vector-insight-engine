@@ -77,7 +77,7 @@ def search_similar_chunks(
 
     print("[query] searching similar chunks, top_k =", top_k)
 
-    # Use query_points with the correct argument name "query_filter"
+    # Very important: use the argument name "query_filter", not "filter"
     resp = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
@@ -122,35 +122,12 @@ def build_context_block(hits: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-def answer_question(
-    question: str,
-    top_k: int = 3,
-    project: Optional[str] = None,
-) -> Dict:
+def call_gemini_with_context(question: str, context_block: str) -> str:
     """
-    Main entry point used by the Streamlit app.
-
-    Returns a dictionary with:
-      - answer: str
-      - hits: list of {index, score, text, project, document_name}
-      - raw_context: str
+    Call Gemini with the user question and the retrieved context snippets.
     """
-    hits = search_similar_chunks(question, top_k=top_k, project=project)
-    context_block = build_context_block(hits)
-
-    if not context_block:
-        answer_text = (
-            "I could not find any relevant context in the current project. "
-            "Try ingesting more documents first."
-        )
-        return {
-            "answer": answer_text,
-            "hits": [],
-            "raw_context": "",
-        }
-
     prompt = f"""
-You are an analytical assistant working on a retrieval augmented system.
+You are an analytical assistant working in a retrieval augmented system.
 
 You receive:
 1. A user question.
@@ -179,18 +156,46 @@ Context snippets:
             max_output_tokens=512,
         ),
     )
+    return (response.text or "").strip()
 
-    answer_text = (response.text or "").strip()
+
+def answer_question(
+    question: str,
+    top_k: int = 3,
+    project: Optional[str] = None,
+) -> Dict:
+    """
+    Main entry point used by the Streamlit app.
+
+    Returns a dictionary with:
+      - answer: str
+      - hits: list of {index, score, text, project, document_name}
+      - raw_context: str
+    """
+    hits = search_similar_chunks(question, top_k=top_k, project=project)
+    context_block = build_context_block(hits)
+
+    if not context_block:
+        answer_text = (
+            "I could not find any relevant context in the current project. "
+            "Try ingesting more documents first."
+        )
+        return {
+            "answer": answer_text,
+            "hits": [],
+            "raw_context": "",
+        }
+
+    answer = call_gemini_with_context(question, context_block)
 
     return {
-        "answer": answer_text,
+        "answer": answer,
         "hits": hits,
         "raw_context": context_block,
     }
 
 
 if __name__ == "__main__":
-    # Small manual test when running this file directly
     demo_question = "What is the main goal of the Vector Insight Engine project?"
     result = answer_question(demo_question, top_k=3, project="demo")
     print("Answer:")
