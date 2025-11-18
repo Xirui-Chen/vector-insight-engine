@@ -1,12 +1,12 @@
 import os
 from typing import List, Dict
+from uuid import uuid4
 
 import google.genai as genai
 from google.genai.types import EmbedContentConfig
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 from dotenv import load_dotenv
-from uuid import uuid4
 
 COLLECTION_NAME = "vector_insight_chunks"
 EMBEDDING_MODEL = "text-embedding-004"
@@ -26,18 +26,30 @@ def get_gemini_client() -> genai.Client:
 
 def get_qdrant_client() -> QdrantClient:
     """
-    Create a Qdrant client using URL and API key from environment variables.
+    Create a Qdrant client.
 
-    We load .env here to make sure QDRANT_URL and QDRANT_API_KEY are available
-    even when this module is used outside of Streamlit.
+    Local dev
+      USE_LOCAL_QDRANT is not set or is "0"
+      load .env and use QDRANT_URL and QDRANT_API_KEY to connect to Qdrant Cloud
+
+    Streamlit Cloud
+      Set USE_LOCAL_QDRANT = "1" in secrets
+      This will use an embedded local Qdrant instance on disk at ./qdrant_data
     """
-    load_dotenv(".env")
+    use_local = os.getenv("USE_LOCAL_QDRANT", "0") == "1"
 
-    url = os.getenv("QDRANT_URL", "http://localhost:6333")
+    if not use_local:
+        # Local development, try to load .env
+        load_dotenv(".env")
+
+    url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
 
-    print(f"[ingest] Using Qdrant URL: {url}")
+    if use_local or not url:
+        print("[ingest] Using local Qdrant at ./qdrant_data")
+        return QdrantClient(path="qdrant_data")
 
+    print(f"[ingest] Using remote Qdrant at {url}")
     return QdrantClient(
         url=url,
         api_key=api_key,
@@ -48,7 +60,7 @@ def get_qdrant_client() -> QdrantClient:
 def split_into_chunks(text: str) -> List[str]:
     """
     Split long text into overlapping chunks.
-    This is simple but good enough for our hackathon project.
+    This is simple but good enough for this project.
     """
     text = text.strip()
     if not text:
@@ -92,7 +104,7 @@ def embed_text(text: str) -> List[float]:
 def ensure_payload_indexes(qdrant: QdrantClient) -> None:
     """
     Ensure we have keyword indexes on 'project' and 'document_name'
-    so that filters in search() work correctly on Qdrant Cloud.
+    so that filters in search() work correctly.
     """
     print(
         "[ingest] ensure_payload_indexes: creating index on "
@@ -159,7 +171,6 @@ def init_collection() -> None:
     else:
         print(f"[ingest] Collection {COLLECTION_NAME} already exists.")
 
-    # Important: make sure payload indexes exist so filters on project work
     ensure_payload_indexes(qdrant)
 
 
@@ -201,7 +212,6 @@ def ingest_text(
             "chunk_index": idx - 1,
         }
 
-        # Generate a unique string id for each point
         point_id = str(uuid4())
 
         points.append(
@@ -231,7 +241,6 @@ def ingest_text(
 
 
 if __name__ == "__main__":
-    # Small manual test when running this file directly
     sample = (
         "Machine learning models depend on the quality and coverage of their"
         " training data. Poor inputs lead to unstable predictions."
