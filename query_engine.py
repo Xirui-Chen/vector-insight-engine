@@ -20,9 +20,16 @@ def get_gemini_client() -> genai.Client:
 
 
 def get_qdrant_client() -> QdrantClient:
-    url = os.getenv("QDRANT_URL", "http://localhost:6333")
+    use_local = os.getenv("USE_LOCAL_QDRANT", "0") == "1"
+    url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
-    return QdrantClient(url=url, api_key=api_key)
+
+    if use_local or not url:
+        print("[query] Using local Qdrant at ./qdrant_data")
+        return QdrantClient(path="qdrant_data")
+
+    print(f"[query] Using remote Qdrant at {url}")
+    return QdrantClient(url=url, api_key=api_key, timeout=10)
 
 
 def embed_text(text: str) -> List[float]:
