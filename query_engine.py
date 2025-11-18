@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import google.genai as genai
 from google.genai.types import EmbedContentConfig, GenerateContentConfig
@@ -13,6 +13,7 @@ GENERATION_MODEL = "gemini-2.0-flash"
 
 
 def get_gemini_client() -> genai.Client:
+    """Create a Gemini client using the API key from environment variables."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set in the environment.")
@@ -21,12 +22,12 @@ def get_gemini_client() -> genai.Client:
 
 def get_qdrant_client() -> QdrantClient:
     """
-    Same logic as ingest.py
+    Create a Qdrant client.
 
-    Local dev:
-      USE_LOCAL_QDRANT is not set or is "0" -> use Qdrant Cloud from .env
+    Local development:
+      USE_LOCAL_QDRANT is not set or equals "0" -> use Qdrant Cloud from .env.
     Streamlit Cloud:
-      USE_LOCAL_QDRANT = "1" in secrets -> use embedded Qdrant at ./qdrant_data
+      USE_LOCAL_QDRANT = "1" -> use embedded local Qdrant with path ./qdrant_data.
     """
     use_local = os.getenv("USE_LOCAL_QDRANT", "0") == "1"
 
@@ -50,7 +51,7 @@ def get_qdrant_client() -> QdrantClient:
 
 def embed_query(text: str) -> List[float]:
     """
-    Embed a user question as a retrieval query vector.
+    Embed the user question into a vector for retrieval.
     """
     client = get_gemini_client()
     result = client.models.embed_content(
@@ -64,12 +65,12 @@ def embed_query(text: str) -> List[float]:
 def search_similar_chunks(
     question: str,
     top_k: int = 3,
-    project: str | None = None,
+    project: Optional[str] = None,
 ) -> List[Dict]:
     """
-    Search Qdrant for the chunks most relevant to the question.
+    Search Qdrant for the most relevant chunks for this question.
 
-    Returns a list of dict hits:
+    Returns a list of hits:
     {
         "index": int,
         "score": float,
@@ -94,26 +95,16 @@ def search_similar_chunks(
 
     print("[query] searching similar chunks, top_k =", top_k)
 
-    # Newer clients have query_points, older ones only have search.
-    if hasattr(qdrant, "query_points"):
-        resp = qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            limit=top_k,
-            filter=query_filter,
-        )
-        raw_hits = resp.points
-    else:
-        resp = qdrant.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
-            limit=top_k,
-            query_filter=query_filter,
-        )
-        raw_hits = resp
+    # Use the recommended query_points API instead of the deprecated search method
+    resp = qdrant.query_points(
+        collection_name=COLLECTION_NAME,
+        query=query_vector,
+        limit=top_k,
+        filter=query_filter,
+    )
+    raw_hits = resp.points
 
     hits: List[Dict] = []
-
     for idx, point in enumerate(raw_hits, start=1):
         payload = point.payload or {}
         hits.append(
@@ -131,7 +122,7 @@ def search_similar_chunks(
 
 def build_context_string(hits: List[Dict]) -> str:
     """
-    Turn retrieved chunks into a numbered context block for Gemini.
+    Build a numbered context block from hits to send to Gemini.
     """
     lines: List[str] = []
     for hit in hits:
@@ -146,7 +137,7 @@ def call_gemini_with_context(
     context: str,
 ) -> str:
     """
-    Ask Gemini to answer the question using only the provided context.
+    Call Gemini with the retrieved context to generate an answer.
     """
     client = get_gemini_client()
 
@@ -182,10 +173,10 @@ Question:
 def answer_question(
     question: str,
     top_k: int = 3,
-    project: str | None = None,
+    project: Optional[str] = None,
 ) -> Dict:
     """
-    Main entry point called from the Streamlit app.
+    Main entry point used by the Streamlit app.
 
     Returns:
     {
@@ -204,10 +195,11 @@ def answer_question(
 
 
 if __name__ == "__main__":
-    # Small CLI test
+    # Quick local test
     q = "What is the main goal of the Vector Insight Engine project?"
     res = answer_question(q, top_k=3, project="demo")
     print("Answer:\n", res["answer"])
     print("\nHits:")
     for h in res["hits"]:
         print(h["index"], h["score"], h["document_name"])
+
