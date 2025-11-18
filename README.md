@@ -8,6 +8,20 @@ This project simulates a real production workflow used in many AI teams, and is 
 
 ---
 
+## 🚀 Live Demo
+Try the interactive app here:  
+➡️ https://vector-insight-engine.streamlit.app
+
+## 🎥 Demo Video
+Watch the walkthrough presentation:  
+➡️ https://drive.google.com/file/d/187vfLKc9OPogECo1U1WLDdzJ3DAYkMz1/view?usp=sharing
+
+## 📊 Slide Deck
+Full slide presentation (PDF):  
+➡️ https://drive.google.com/file/d/1ecfZCPXDcVx3oVqHrWAqq5CTGEURlVb5/view?usp=sharing
+
+---
+
 ## Why this project matters
 
 Analysts, data scientists, and product teams handle large amounts of unstructured text: research notes, specifications, reports, client documents.  
