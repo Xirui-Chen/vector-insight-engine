@@ -1,5 +1,7 @@
 # Vector Insight Engine
 
+[![Hackathon](https://img.shields.io/badge/AI%20Genesis%20Hackathon-2025-purple?style=for-the-badge)]()
+
 Vector Insight Engine is a practical research and analysis tool that turns unstructured documents into searchable insights.  
 
 It combines Google Gemini for reasoning and Qdrant Cloud for vector search to deliver evidence based answers that analysts and data scientists can trust.
